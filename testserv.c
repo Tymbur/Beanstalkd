@@ -191,8 +191,8 @@ mustforksrv(void)
         exit(1);
     }
 
-    size_t len = sizeof(addr);
-    int r = getsockname(srv.sock.fd, (struct sockaddr *)&addr, (socklen_t *)&len);
+    socklen_t len = sizeof(addr);
+    int r = getsockname(srv.sock.fd, (struct sockaddr *)&addr, &len);
     if (r == -1 || len > sizeof(addr)) {
         puts("mustforksrv failed");
         exit(1);
@@ -380,10 +380,15 @@ cttest_too_long_commandline()
     int port = SERVER();
     int fd = mustdiallocal(port);
     int i;
-    for (i = 0; i < 5; i++)
-        mustsend(fd, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    for (i = 0; i < 10; i++)
+        mustsend(fd, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"); // 50 bytes
     mustsend(fd, "\r\n");
     ckresp(fd, "BAD_FORMAT\r\n");
+    // Issue another command and check that reponse is not "UNKNOWN_COMMAND"
+    // as described in issue #337
+    mustsend(fd, "put 0 0 1 1\r\n");
+    mustsend(fd, "A\r\n");
+    ckresp(fd, "INSERTED 1\r\n");
 }
 
 void
@@ -1116,36 +1121,209 @@ void
 cttest_reserve_ttr_deadline_soon()
 {
     int port = SERVER();
-    int prod = mustdiallocal(port);
+    int fd = mustdiallocal(port);
 
-    mustsend(prod, "put 0 0 1 1\r\n");
-    mustsend(prod, "a\r\n");
-    ckresp(prod, "INSERTED 1\r\n");
+    mustsend(fd, "put 0 0 1 1\r\n");
+    mustsend(fd, "a\r\n");
+    ckresp(fd, "INSERTED 1\r\n");
 
-    mustsend(prod, "reserve-with-timeout 1\r\n");
-    ckresp(prod, "RESERVED 1 1\r\n");
-    ckresp(prod, "a\r\n");
+    mustsend(fd, "reserve-with-timeout 1\r\n");
+    ckresp(fd, "RESERVED 1 1\r\n");
+    ckresp(fd, "a\r\n");
 
-    // After 0.3s the job should be still reserved.
-    usleep(300000);
-    mustsend(prod, "stats-job 1\r\n");
-    ckrespsub(prod, "OK ");
-    ckrespsub(prod, "\nstate: reserved\n");
+    // After 0.2s the job should be still reserved.
+    usleep(200000);
+    mustsend(fd, "stats-job 1\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nstate: reserved\n");
 
-    mustsend(prod, "reserve-with-timeout 1\r\n");
-    ckresp(prod, "DEADLINE_SOON\r\n");
+    mustsend(fd, "reserve-with-timeout 1\r\n");
+    ckresp(fd, "DEADLINE_SOON\r\n");
 
     // Job should be reserved; last "reserve" took less than 1s.
-    mustsend(prod, "stats-job 1\r\n");
-    ckrespsub(prod, "OK ");
-    ckrespsub(prod, "\nstate: reserved\n");
+    mustsend(fd, "stats-job 1\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nstate: reserved\n");
 
     // We don't want to process the job, so release it and check that it's ready.
-    mustsend(prod, "release 1 0 0\r\n");
-    ckresp(prod, "RELEASED\r\n");
-    mustsend(prod, "stats-job 1\r\n");
-    ckrespsub(prod, "OK ");
-    ckrespsub(prod, "\nstate: ready\n");
+    mustsend(fd, "release 1 0 0\r\n");
+    ckresp(fd, "RELEASED\r\n");
+    mustsend(fd, "stats-job 1\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nstate: ready\n");
+}
+
+void
+cttest_reserve_job_ttr_deadline_soon()
+{
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+
+    mustsend(fd, "put 0 5 1 1\r\n");
+    mustsend(fd, "a\r\n");
+    ckresp(fd, "INSERTED 1\r\n");
+
+    mustsend(fd, "stats-job 1\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nstate: delayed\n");
+
+    mustsend(fd, "reserve-job 1\r\n");
+    ckresp(fd, "RESERVED 1 1\r\n");
+    ckresp(fd, "a\r\n");
+
+    // After 0.1s the job should be still reserved.
+    usleep(100000);
+    mustsend(fd, "stats-job 1\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nstate: reserved\n");
+
+    // Reservation made with reserve-job should behave the same way as other
+    // reserve commands, e.g. produce "deadline soon" message, and get released
+    // when ttr ends.
+    mustsend(fd, "reserve-with-timeout 1\r\n");
+    ckresp(fd, "DEADLINE_SOON\r\n");
+
+    // Job should be reserved; last "reserve" took less than 1s.
+    mustsend(fd, "stats-job 1\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nstate: reserved\n");
+
+    // We are not able to process the job in time. Check that it gets released.
+    // The job was in delayed state. It becomes ready when it gets auto-released.
+    usleep(1000000); // 1.0s
+    // put a dummy job
+    mustsend(fd, "put 0 0 1 1\r\n");
+    mustsend(fd, "B\r\n");
+    ckresp(fd, "INSERTED 2\r\n");
+    // check that ID=1 gets released
+    mustsend(fd, "stats-job 1\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nstate: ready\n");
+}
+
+void
+cttest_reserve_job_already_reserved()
+{
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+
+    mustsend(fd, "put 0 0 1 1\r\n");
+    mustsend(fd, "A\r\n");
+    ckresp(fd, "INSERTED 1\r\n");
+
+    mustsend(fd, "reserve-job 1\r\n");
+    ckresp(fd, "RESERVED 1 1\r\n");
+    ckresp(fd, "A\r\n");
+
+    // Job should not be reserved twice.
+    mustsend(fd, "reserve-job 1\r\n");
+    ckresp(fd, "NOT_FOUND\r\n");
+}
+
+void
+cttest_reserve_job_ready()
+{
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+
+    mustsend(fd, "put 0 0 1 1\r\n");
+    mustsend(fd, "A\r\n");
+    ckresp(fd, "INSERTED 1\r\n");
+    mustsend(fd, "put 0 0 1 1\r\n");
+    mustsend(fd, "B\r\n");
+    ckresp(fd, "INSERTED 2\r\n");
+
+    mustsend(fd, "reserve-job 2\r\n");
+    ckresp(fd, "RESERVED 2 1\r\n");
+    ckresp(fd, "B\r\n");
+
+    // Non-existing job.
+    mustsend(fd, "reserve-job 3\r\n");
+    ckresp(fd, "NOT_FOUND\r\n");
+
+    // id=1 was not reserved.
+    mustsend(fd, "release 1 1 0\r\n");
+    ckresp(fd, "NOT_FOUND\r\n");
+
+    mustsend(fd, "release 2 1 0\r\n");
+    ckresp(fd, "RELEASED\r\n");
+}
+
+void
+cttest_reserve_job_delayed()
+{
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+
+    mustsend(fd, "put 0 100 1 1\r\n");
+    mustsend(fd, "A\r\n");
+    ckresp(fd, "INSERTED 1\r\n");
+    mustsend(fd, "put 0 100 1 1\r\n");
+    mustsend(fd, "B\r\n");
+    ckresp(fd, "INSERTED 2\r\n");
+    mustsend(fd, "put 0 100 1 1\r\n");
+    mustsend(fd, "C\r\n");
+    ckresp(fd, "INSERTED 3\r\n");
+
+    mustsend(fd, "reserve-job 2\r\n");
+    ckresp(fd, "RESERVED 2 1\r\n");
+    ckresp(fd, "B\r\n");
+
+    mustsend(fd, "release 2 1 0\r\n");
+    ckresp(fd, "RELEASED\r\n");
+
+    // verify that job was released in ready state.
+    mustsend(fd, "stats-job 2\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nstate: ready\n");
+}
+
+void
+cttest_reserve_job_buried()
+{
+    int port = SERVER();
+    int fd = mustdiallocal(port);
+
+    // put, reserve and bury
+    mustsend(fd, "put 0 0 1 1\r\n");
+    mustsend(fd, "A\r\n");
+    ckresp(fd, "INSERTED 1\r\n");
+    mustsend(fd, "reserve-job 1\r\n");
+    ckresp(fd, "RESERVED 1 1\r\n");
+    ckresp(fd, "A\r\n");
+    mustsend(fd, "bury 1 1\r\n");
+    ckresp(fd, "BURIED\r\n");
+
+    // put, reserve and bury
+    mustsend(fd, "put 0 0 1 1\r\n");
+    mustsend(fd, "B\r\n");
+    ckresp(fd, "INSERTED 2\r\n");
+    mustsend(fd, "reserve-job 2\r\n");
+    ckresp(fd, "RESERVED 2 1\r\n");
+    ckresp(fd, "B\r\n");
+    mustsend(fd, "bury 2 1\r\n");
+    ckresp(fd, "BURIED\r\n");
+
+    // reserve by ids
+    mustsend(fd, "reserve-job 2\r\n");
+    ckresp(fd, "RESERVED 2 1\r\n");
+    ckresp(fd, "B\r\n");
+    mustsend(fd, "reserve-job 1\r\n");
+    ckresp(fd, "RESERVED 1 1\r\n");
+    ckresp(fd, "A\r\n");
+
+    // release back and check if jobs are ready.
+    mustsend(fd, "release 1 1 0\r\n");
+    ckresp(fd, "RELEASED\r\n");
+    mustsend(fd, "release 2 1 0\r\n");
+    ckresp(fd, "RELEASED\r\n");
+    mustsend(fd, "stats-job 1\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nstate: ready\n");
+    mustsend(fd, "stats-job 2\r\n");
+    ckrespsub(fd, "OK ");
+    ckrespsub(fd, "\nstate: ready\n");
+
 }
 
 void
@@ -1876,13 +2054,13 @@ ctbench_put_delete_wal_1024_fsync_000ms(int n)
 void
 ctbench_put_delete_wal_1024_fsync_050ms(int n)
 {
-    bench_put_delete_size(n, 1024, 512000, 1, 100);
+    bench_put_delete_size(n, 1024, 512000, 1, 50);
 }
 
 void
 ctbench_put_delete_wal_1024_fsync_200ms(int n)
 {
-    bench_put_delete_size(n, 1024, 512000, 1, 500);
+    bench_put_delete_size(n, 1024, 512000, 1, 200);
 }
 
 void
@@ -1900,13 +2078,13 @@ ctbench_put_delete_wal_8192_fsync_000ms(int n)
 void
 ctbench_put_delete_wal_8192_fsync_050ms(int n)
 {
-    bench_put_delete_size(n, 8192, 512000, 1, 100);
+    bench_put_delete_size(n, 8192, 512000, 1, 50);
 }
 
 void
 ctbench_put_delete_wal_8192_fsync_200ms(int n)
 {
-    bench_put_delete_size(n, 8192, 512000, 1, 500);
+    bench_put_delete_size(n, 8192, 512000, 1, 200);
 }
 
 void

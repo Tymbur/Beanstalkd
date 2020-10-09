@@ -62,6 +62,9 @@ typedef int(FAlloc)(int, int);
 // The width is restricted by Jobrec.body_size that is int32.
 #define JOB_DATA_SIZE_LIMIT_MAX 1073741824
 
+// The default value for the fsync (-f) parameter, milliseconds.
+#define DEFAULT_FSYNC_MS 50
+
 // Use this macro to designate unused parameters in functions.
 #define UNUSED_PARAMETER(x) (void)(x)
 
@@ -78,13 +81,13 @@ extern FAlloc *falloc;
 
 // stats structure holds counters for operations, both globally and per tube.
 struct stats {
-    uint urgent_ct;
-    uint waiting_ct;
-    uint buried_ct;
-    uint reserved_ct;
-    uint pause_ct;
-    uint64   total_delete_ct;
-    uint64   total_jobs_ct;
+    uint64 urgent_ct;
+    uint64 waiting_ct;
+    uint64 buried_ct;
+    uint64 reserved_ct;
+    uint64 pause_ct;
+    uint64 total_delete_ct;
+    uint64 total_jobs_ct;
 };
 
 
@@ -437,10 +440,9 @@ struct Wal {
     int64  alive; // bytes in use
     int64  nmig;  // migrations
     int64  nrec;  // records written ever
-    int    wantsync;
-    int64  syncrate;
+    int    wantsync; // do we sync to disk?
+    int64  syncrate; // how often we sync to disk, in nanoseconds
     int64  lastsync;
-    int    nocomp; // disable binlog compaction?
 };
 int  waldirlock(Wal*);
 void walinit(Wal*, Job *list);

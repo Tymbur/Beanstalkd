@@ -5,7 +5,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
-#include "sd-daemon.h"
+
+#ifdef HAVE_LIBSYSTEMD
+#include <systemd/sd-daemon.h>
+#endif
 
 const char *progname;
 
@@ -86,9 +89,11 @@ zalloc(int n)
 static void
 warn_systemd_ignored_option(char *opt, char *arg)
 {
+#ifdef HAVE_LIBSYSTEMD
     if (sd_listen_fds(0) > 0) {
         warnx("inherited listen fd; ignoring option: %s %s", opt, arg);
     }
+#endif
 }
 
 
@@ -100,21 +105,21 @@ usage(int code)
             "\n"
             "Options:\n"
             " -b DIR   write-ahead log directory\n"
-            " -f MS    fsync at most once every MS milliseconds"
-                       " (use -f0 for \"always fsync\")\n"
-            " -F       never fsync (default)\n"
+            " -f MS    fsync at most once every MS milliseconds (default is %dms);\n"
+            "          use -f0 for \"always fsync\"\n"
+            " -F       never fsync\n"
             " -l ADDR  listen on address (default is 0.0.0.0)\n"
             " -p PORT  listen on port (default is " Portdef ")\n"
             " -u USER  become user and group\n"
-            " -z BYTES set the maximum job size in bytes (default is %d, max allowed is %d)\n"
-            " -s BYTES set the size of each write-ahead log file (default is %d)\n"
-            "            (will be rounded up to a multiple of 4096 bytes)\n"
-            " -c       compact the binlog (default)\n"
-            " -n       do not compact the binlog\n"
+            " -z BYTES set the maximum job size in bytes (default is %d);\n"
+            "          max allowed is %d bytes\n"
+            " -s BYTES set the size of each write-ahead log file (default is %d);\n"
+            "          will be rounded up to a multiple of 4096 bytes\n"
             " -v       show version information\n"
             " -V       increase verbosity\n"
             " -h       show this help\n",
             progname,
+            DEFAULT_FSYNC_MS,
             JOB_DATA_SIZE_LIMIT_DEFAULT,
             JOB_DATA_SIZE_LIMIT_MAX,
             Filesizedef);
@@ -176,10 +181,10 @@ optparse(Server *s, char **argv)
                     s->wal.filesize = parse_size_t(EARGF(flagusage("-s")));
                     break;
                 case 'c':
-                    s->wal.nocomp = 0;
+                    warnx("-c flag was removed. binlog is always compacted.");
                     break;
                 case 'n':
-                    s->wal.nocomp = 1;
+                    warnx("-n flag was removed. binlog is always compacted.");
                     break;
                 case 'f':
                     ms = (int64)parse_size_t(EARGF(flagusage("-f")));
